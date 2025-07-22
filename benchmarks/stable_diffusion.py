@@ -221,7 +221,7 @@ if __name__ == "__main__":
 
   # benchmark settings
   NUM_BENCH = 10
-  bench_times, bench_peak_vrams = [], []
+  bench_times, bench_peak_vrams, bench_ips = [], [], []
 
   model = StableDiffusion()
 
@@ -274,17 +274,19 @@ if __name__ == "__main__":
                        Tensor([timestep]), alphas[tid], alphas_prev[tid], Tensor([args.guidance]))
         step_peak = max(step_peak, GlobalCounters.mem_used)
 
-    # decode and save (overwrites same file)
+    elapsed = time.perf_counter() - start
+    ips = len(timesteps) / elapsed
+    bench_times.append(elapsed)
+    bench_peak_vrams.append(step_peak / 1e9)
+    bench_ips.append(ips)
+
     x = model.decode(latent)
     im = Image.fromarray(x.numpy())
     im.save(args.out)
     if not args.noshow:
       im.show()
 
-    elapsed = time.perf_counter() - start
-    bench_times.append(elapsed)
-    bench_peak_vrams.append(step_peak / 1e9)
-    print(f"Run {i+1}: {elapsed:.2f}s, peak VRAM {step_peak/1e9:.2f} GB")
+    print(f"Run {i+1}: {elapsed:.2f}s, peak VRAM {step_peak/1e9:.2f} GB, {ips:.2f} iters/s")
 
   # summary
   print("\nBenchmark summary over", NUM_BENCH, "runs")
@@ -292,3 +294,5 @@ if __name__ == "__main__":
   print(f"Min time      : {min(bench_times):.2f}s, Max time {max(bench_times):.2f}s")
   print(f"Avg peak VRAM : {statistics.mean(bench_peak_vrams):.2f} GB")
   print(f"Min VRAM      : {min(bench_peak_vrams):.2f} GB, Max VRAM {max(bench_peak_vrams):.2f} GB")
+  print(f"Avg iters/sec : {statistics.mean(bench_ips):.2f}")
+  print(f"Min iters/sec : {min(bench_ips):.2f}, Max iters/sec {max(bench_ips):.2f}")
