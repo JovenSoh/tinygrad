@@ -3,4 +3,5 @@ sentencepiece==0.2.0
 tiktoken==0.9.0
 numpy==2.2.6
 blobfile==3.0.0
+bottle==0.13.4
 -e .

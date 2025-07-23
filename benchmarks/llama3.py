@@ -240,7 +240,7 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("--download_model", action="store_true", help="Download a model")
   parser.add_argument("--model", type=Path, help="Model path")
-  parser.add_argument("--size", choices=["1B", "8B", "70B", "405B"], default="8B", help="Model size")
+  parser.add_argument("--size", choices=["1B", "8B", "70B", "405B"], default="1B", help="Model size")
   parser.add_argument("--shard", type=int, default=1, help="Shard the model across multiple devices")
   parser.add_argument("--quantize", choices=["int8", "nf4", "float16"], help="Quantization method")
   parser.add_argument("--no_api", action="store_true", help="Disable the api and run a cli test interface")
@@ -290,203 +290,38 @@ if __name__ == "__main__":
   model = build_transformer(args.model, model_size=args.size, quantize=args.quantize, device=device)
   param_bytes = sum(x.uop.size * x.dtype.itemsize for x in get_parameters(model))
 
-  if not args.no_api and not args.benchmark:
-    from bottle import Bottle, request, response, HTTPResponse, abort, static_file
-    app = Bottle()
+  toks = [tokenizer.bos_id] + encode_message("user", "Hello.") + encode_role("assistant")
 
-    cors_headers = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Origin, Accept, Content-Type, X-Requested-With, X-CSRF-Token, Authorization",
-      "Access-Control-Allow-Credentials": "true",
-    }
-    @app.hook("before_request")
-    def handle_options():
-      if request.method == "OPTIONS": raise HTTPResponse(headers=cors_headers)
-    @app.hook("after_request")
-    def enable_cors():
-      for key, value in cors_headers.items(): response.set_header(key, value)
-
-    @app.route("/<filename>")
-    def server_static(filename): return static_file(filename, root=(Path(__file__).parent / "tinychat").as_posix())
-    @app.route("/assets/<filename:path>")
-    def server_assets(filename): return static_file(filename, root=(Path(__file__).parent / "tinychat" / "assets").as_posix())
-    @app.route("/")
-    def index():
-      return static_file("index.html", root=(Path(__file__).parent / "tinychat").as_posix())
-
-    @app.get("/v1/models")
-    def models():
-      return json.dumps([str(args.model)])
-
-    @app.post("/v1/internal/token-count")
-    def token_count():
-      rjson = json.loads(request.body.read())
-      return json.dumps(len(tokenizer.encode(rjson.get("text", ""))))
-    @app.post("/v1/token/encode")
-    def token_encode():
-      rjson = json.loads(request.body.read())
-      return json.dumps(tokenizer.encode(rjson.get("text", "")))
-
-    @app.post("/v1/completions")
-    def completions():
-      rjson = json.loads(request.body.read())
-
-      # check if we are streaming
-      if rjson.get("stream", False):
-        response.content_type = "text/event-stream"
-        response.set_header("Cache-Control", "no-cache")
-      else: abort(400, "streaming required")
-
-      toks = [tokenizer.bos_id] + tokenizer.encode(rjson.get("prompt", ""), allow_special=True)
-
-      start_pos = prefill(model, toks[:-1])
-      last_tok = toks[-1]
-      while True:
-        GlobalCounters.reset()
-        tok = model(Tensor([[last_tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P).item()
-        start_pos += 1
-        last_tok = tok
-        if tok in tokenizer.stop_tokens: break
-
-        res = {
-          "choices": [{
-            "text": tokenizer.decode([tok]),
-          }]
-        }
-        yield f"data: {json.dumps(res)}\n\n"
-
-    @app.post("/v1/chat/token/encode")
-    def chat_token_encode():
-      rjson = json.loads(request.body.read())
-      if "messages" not in rjson: abort(400, "messages required")
-      toks = [tokenizer.bos_id]
-      for message in rjson["messages"]:
-        toks += encode_message(message["role"], message["content"])
-      if len(rjson["messages"]) > 0 and message["role"] == "user":
-        toks += encode_role("assistant")
-      return json.dumps(toks)
-
-    @app.post("/v1/chat/completions")
-    def chat_completions():
-      global last_seen_toks
-      rjson = json.loads(request.body.read())
-      if "messages" not in rjson: abort(400, "messages required")
-
-      # check if we are streaming
-      if rjson.get("stream", False):
-        response.content_type = "text/event-stream"
-        response.set_header("Cache-Control", "no-cache")
-      else: abort(400, "streaming required")
-
-      toks = [tokenizer.bos_id]
-      for message in rjson["messages"]:
-        toks += encode_message(message["role"], message["content"])
-      # ensure that the last message was a user message
-      if message["role"] != "user": abort(400, "last message must be a user message")
-      toks += encode_role("assistant")
-
-      random_id = random.randbytes(16).hex()
-
-      start_pos = prefill(model, toks[:-1])
-      last_tok = toks[-1]
-      last_seen_toks.append(last_tok)
-      while True:
-        GlobalCounters.reset()
-        tok = model(Tensor([[last_tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P).item()
-        start_pos += 1
-        last_tok = tok
-        last_seen_toks.append(tok)
-        if tok in tokenizer.stop_tokens: break
-
-        res = {
-          "id": random_id,
-          "object": "chat.completion.chunk",
-          "created": int(time.time()),
-          "model": str(args.model),
-          "choices": [{
-            "index": 0,
-            "delta": {
-              "role": "assistant",
-              "content": tokenizer.decode([tok]),
-            },
-            "finish_reason": None,
-          }]
-        }
-        yield f"data: {json.dumps(res)}\n\n"
-
-      res = {
-        "id": random_id,
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": str(args.model),
-        "choices": [{
-          "index": 0,
-          "delta": {},
-          "finish_reason": "stop",
-        }]
+  start_pos = prefill(model, toks[:-1])
+  last_tok = toks[-1]
+  generated = ""
+  for _ in range(200):
+    GlobalCounters.reset()
+    st = GlobalCounters.time_sum_s
+    with Profiling(enabled=args.profile):
+      with Timing("total ", on_exit=lambda x: f", {1e9/x:.2f} tok/s, {GlobalCounters.global_mem/x:.2f} GB/s, param {param_bytes/x:.2f} GB/s"):
+        with WallTimeEvent(BenchEvent.STEP):
+          with Timing("enqueue in ", on_exit=(lambda et: (f", {(GlobalCounters.time_sum_s-st)*1e3:.2f} ms on GPU" if DEBUG>=2 else "")+
+                      f", {GlobalCounters.global_ops*1e-9:.2f} GOPS, {GlobalCounters.global_mem*1e-9:.2f} GB"+
+                      (f", {GlobalCounters.global_mem*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s, param {param_bytes*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s" if DEBUG>=2 else "")) if DEBUG else None):
+            tok = model(Tensor([[last_tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P)
+          tok = tok.item()
+    start_pos += 1
+    last_tok = tok
+    generated += tokenizer.decode([tok])
+    print(generated)
+  if "LLaMA-3/8B-SF-DPO" in args.model.as_posix() and (TEMPERATURE == 0.85 or TEMPERATURE == 0):
+    if TEMPERATURE == 0.85:
+      EXPECTED_TEXT = {
+        1: "Hello! How can I help you today? If you have any questions or need assistance with anything,",
+        2: "Hello! How can I help you today? If you have any questions, need assistance or just want",
+        3: "Hello! How can I help you today? If you have any questions or need assistance, feel free",
+        4: "Hello! How can I assist you today? If you have any questions, need information, or require",
+        5: "Hello! How can I assist you today? If you have any questions or need help with something",
+        6: "Hello! How can I assist you today? If you have any questions, need information, or require",
       }
-      yield f"data: {json.dumps(res)}\n\n"
-
-    app.run(host=args.host, port=args.port, debug=args.debug)
-  elif args.benchmark:
-    toks = [tokenizer.bos_id] + encode_message("user", "Hello.") + encode_role("assistant")
-
-    start_pos = prefill(model, toks[:-1])
-    last_tok = toks[-1]
-    generated = ""
-    for _ in range(20):
-      GlobalCounters.reset()
-      st = GlobalCounters.time_sum_s
-      with Profiling(enabled=args.profile):
-        with Timing("total ", on_exit=lambda x: f", {1e9/x:.2f} tok/s, {GlobalCounters.global_mem/x:.2f} GB/s, param {param_bytes/x:.2f} GB/s"):
-          with WallTimeEvent(BenchEvent.STEP):
-            with Timing("enqueue in ", on_exit=(lambda et: (f", {(GlobalCounters.time_sum_s-st)*1e3:.2f} ms on GPU" if DEBUG>=2 else "")+
-                        f", {GlobalCounters.global_ops*1e-9:.2f} GOPS, {GlobalCounters.global_mem*1e-9:.2f} GB"+
-                        (f", {GlobalCounters.global_mem*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s, param {param_bytes*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s" if DEBUG>=2 else "")) if DEBUG else None):
-              tok = model(Tensor([[last_tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P)
-            tok = tok.item()
-      start_pos += 1
-      last_tok = tok
-      generated += tokenizer.decode([tok])
-      print(generated)
-    if "LLaMA-3/8B-SF-DPO" in args.model.as_posix() and (TEMPERATURE == 0.85 or TEMPERATURE == 0):
-      if TEMPERATURE == 0.85:
-        EXPECTED_TEXT = {
-          1: "Hello! How can I help you today? If you have any questions or need assistance with anything,",
-          2: "Hello! How can I help you today? If you have any questions, need assistance or just want",
-          3: "Hello! How can I help you today? If you have any questions or need assistance, feel free",
-          4: "Hello! How can I assist you today? If you have any questions, need information, or require",
-          5: "Hello! How can I assist you today? If you have any questions or need help with something",
-          6: "Hello! How can I assist you today? If you have any questions, need information, or require",
-        }
-      else:
-        EXPECTED_TEXT = {k: "Hello! How can I assist you today? If you have any questions or need help with something," for k in range(1, 7)}
-      assert generated == EXPECTED_TEXT[args.shard], f"{generated=} {EXPECTED_TEXT[args.shard]}"
-      print("\n" + colored("output validated", "green"))  # NOTE: "\n" inside colored does not render the color in github action
-  else:
-    prompt = [tokenizer.bos_id] + encode_message("system", "You are an helpful assistant.")
-
-    start_pos = prefill(model, prompt)
-    while True:
-      toks = encode_message("user", input("Q: ")) + encode_role("assistant")
-
-      start_pos = prefill(model, toks[:-1], start_pos=start_pos)
-      last_tok = toks[-1]
-      while True:
-        GlobalCounters.reset()
-        if args.timing or args.profile: print("")
-        st = GlobalCounters.time_sum_s
-        with Profiling(enabled=args.profile):
-          with Timing("total ", enabled=args.timing, on_exit=lambda x: f", {1e9/x:.2f} tok/s, {GlobalCounters.global_mem/x:.2f} GB/s, param {param_bytes/x:.2f} GB/s"):
-            with Timing("enqueue in ", on_exit=(lambda et: (f", {(GlobalCounters.time_sum_s-st)*1e3:.2f} ms on GPU" if DEBUG>=2 else "")+
-                        f", {GlobalCounters.global_ops*1e-9:.2f} GOPS, {GlobalCounters.global_mem*1e-9:.2f} GB"+
-                        (f", {GlobalCounters.global_mem*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s, param {param_bytes*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s" if DEBUG>=2 else "")) if DEBUG else None, enabled=args.timing):
-
-              tok = model(Tensor([[last_tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P)
-            tok = tok.item()
-        start_pos += 1
-        last_tok = tok
-        if tok in tokenizer.stop_tokens: break
-        print(tokenizer.decode([tok]), end="", flush=True)
-      print(flush=True)
+    else:
+      EXPECTED_TEXT = {k: "Hello! How can I assist you today? If you have any questions or need help with something," for k in range(1, 7)}
+    assert generated == EXPECTED_TEXT[args.shard], f"{generated=} {EXPECTED_TEXT[args.shard]}"
+    print("\n" + colored("output validated", "green"))  # NOTE: "\n" inside colored does not render the color in github action
+  
