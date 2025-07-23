@@ -295,33 +295,87 @@ if __name__ == "__main__":
   start_pos = prefill(model, toks[:-1])
   last_tok = toks[-1]
   generated = ""
-  for _ in range(200):
-    GlobalCounters.reset()
-    st = GlobalCounters.time_sum_s
-    with Profiling(enabled=args.profile):
-      with Timing("total ", on_exit=lambda x: f", {1e9/x:.2f} tok/s, {GlobalCounters.global_mem/x:.2f} GB/s, param {param_bytes/x:.2f} GB/s"):
-        with WallTimeEvent(BenchEvent.STEP):
-          with Timing("enqueue in ", on_exit=(lambda et: (f", {(GlobalCounters.time_sum_s-st)*1e3:.2f} ms on GPU" if DEBUG>=2 else "")+
-                      f", {GlobalCounters.global_ops*1e-9:.2f} GOPS, {GlobalCounters.global_mem*1e-9:.2f} GB"+
-                      (f", {GlobalCounters.global_mem*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s, param {param_bytes*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s" if DEBUG>=2 else "")) if DEBUG else None):
-            tok = model(Tensor([[last_tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P)
-          tok = tok.item()
-    start_pos += 1
-    last_tok = tok
-    generated += tokenizer.decode([tok])
+  # load paragraphs
+  para_path = Path(__file__).parent / "llama_paragraphs"
+  text = para_path.read_text(encoding="utf-8")
+  paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+
+  times = []
+  peaks = []
+  ips = []
+  
+  for idx, paragraph in enumerate(paragraphs, start=1):
+    # build initial token sequence: <BOS> user: paragraph <EOT>
+    toks = [tokenizer.bos_id] + encode_message("user", paragraph) + encode_role("assistant")
+    start_pos = prefill(model, toks[:-1])
+    last_tok  = toks[-1]
+    generated = ""
+  
+    start_time = GlobalCounters.time_sum_s
+    #generate 500 tokens
+    for _ in range(500):
+      GlobalCounters.reset()
+      st = GlobalCounters.time_sum_s
+      with Profiling(enabled=args.profile):
+        with Timing("total ", on_exit=lambda x: f", {1e9/x:.2f} tok/s, {GlobalCounters.global_mem/x:.2f} GB/s, param {param_bytes/x:.2f} GB/s"):
+          with WallTimeEvent(BenchEvent.STEP):
+            with Timing("enqueue in ", on_exit=(lambda et: (f", {(GlobalCounters.time_sum_s-st)*1e3:.2f} ms on GPU" if DEBUG>=2 else "")+
+                        f", {GlobalCounters.global_ops*1e-9:.2f} GOPS, {GlobalCounters.global_mem*1e-9:.2f} GB"+
+                        (f", {GlobalCounters.global_mem*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s, param {param_bytes*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s" if DEBUG>=2 else "")) if DEBUG else None):
+              tok = model(Tensor([[last_tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P)
+            tok = tok.item()
+      start_pos += 1
+      last_tok = tok
+      generated += tokenizer.decode([tok])
+      peak_vram = max(peak_vram, GlobalCounters.mem_used)
+    elapsed = GlobalCounters.time_sum_s - start_time
+    times += elapsed
+    peaks += peak_vram
+    tps += 500 / (GlobalCounters.time_sum_s - start_time)
+    print(f"Paragraph {idx}: {elapsed:.2f}s, {500 / (GlobalCounters.time_sum_s - start_time) :.2f} tok/s, peak VRAM {peak_vram/1e9:.2f} GB")
     print(generated)
-  if "LLaMA-3/8B-SF-DPO" in args.model.as_posix() and (TEMPERATURE == 0.85 or TEMPERATURE == 0):
-    if TEMPERATURE == 0.85:
-      EXPECTED_TEXT = {
-        1: "Hello! How can I help you today? If you have any questions or need assistance with anything,",
-        2: "Hello! How can I help you today? If you have any questions, need assistance or just want",
-        3: "Hello! How can I help you today? If you have any questions or need assistance, feel free",
-        4: "Hello! How can I assist you today? If you have any questions, need information, or require",
-        5: "Hello! How can I assist you today? If you have any questions or need help with something",
-        6: "Hello! How can I assist you today? If you have any questions, need information, or require",
-      }
-    else:
-      EXPECTED_TEXT = {k: "Hello! How can I assist you today? If you have any questions or need help with something," for k in range(1, 7)}
-    assert generated == EXPECTED_TEXT[args.shard], f"{generated=} {EXPECTED_TEXT[args.shard]}"
-    print("\n" + colored("output validated", "green"))  # NOTE: "\n" inside colored does not render the color in github action
+
+  # first run stats
+  first_run = {
+      "time_seconds": round(times[0], 2),
+      "peak_vram_gb": round(peaks[0] / 1e9, 2),
+      "iterations_per_second": round(ips[0], 2)
+  }
+
+  # subsequent runs
+  sub_times = times[1:]
+  sub_peaks = peaks[1:]
+  sub_ips   = ips[1:]
+
+  subsequent_runs = {
+      "average": {
+          "time_seconds": round(sum(sub_times)/len(sub_times), 2),
+          "peak_vram_gb": round(sum(sub_peaks)/len(sub_peaks)/1e9, 2),
+          "iterations_per_second": round(sum(sub_ips)/len(sub_ips), 2)
+      },
+      "min": {
+          "time_seconds": round(min(sub_times), 2),
+          "peak_vram_gb": round(min(sub_peaks)/1e9, 2),
+          "iterations_per_second": round(min(sub_ips), 2)
+      },
+      "max": {
+          "time_seconds": round(max(sub_times), 2),
+          "peak_vram_gb": round(max(sub_peaks)/1e9, 2),
+          "iterations_per_second": round(max(sub_ips), 2)
+      },
+      "num_runs": len(sub_times)
+  }
+
+  # final JSON structure
+  result = {
+      "first_run": first_run,
+      "subsequent_runs": subsequent_runs
+  }
+
+  # write to file
+  out_path = Path(__file__).parent / "llama_stats.json"
+  with open(out_path, "w", encoding="utf-8") as f:
+      json.dump(result, f, indent=2)
+
+  print(f"Stats written to {out_path}") 
   
