@@ -51,7 +51,6 @@ wandb
 model.safetensors
 quickstart.py
 .hypothesis
-weights
 *.lprof
 comgr_*
 *.pkl
