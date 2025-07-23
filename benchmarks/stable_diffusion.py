@@ -206,134 +206,115 @@ class StableDiffusion:
     return x_prev.realize()
 
 if __name__ == "__main__":
-  default_prompt = "a horse sized cat eating a bagel"
-  parser = argparse.ArgumentParser(description='Run Stable Diffusion',
-                                   formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-  parser.add_argument('--steps', type=int, default=6, help="Number of steps in diffusion")
-  parser.add_argument('--prompt', type=str, default=default_prompt, help="Phrase to render")
-  parser.add_argument('--out', type=str, default=Path(tempfile.gettempdir()) / "rendered.png",
-                      help="Output filename")
-  parser.add_argument('--noshow', action='store_true', help="Do not show the image")
-  parser.add_argument('--fp16', action='store_true', help="Cast the weights to float16")
-  parser.add_argument('--timing', action='store_true', help="Print timing per step")
-  parser.add_argument('--seed', type=int, help="Set the random latent seed")
-  parser.add_argument('--guidance', type=float, default=7.5, help="Prompt strength")
-  args = parser.parse_args()
+    default_prompt = "a horse sized cat eating a bagel"
+    parser = argparse.ArgumentParser(
+        description="Run Stable Diffusion",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("--steps",    type=int,   default=6,   help="Number of steps in diffusion")
+    parser.add_argument("--out",      type=str,   default=None,
+                        help="Output filename or directory")
+    parser.add_argument("--noshow",   action="store_true", help="Do not show the image")
+    parser.add_argument("--fp16",     action="store_true", help="Cast the weights to float16")
+    parser.add_argument("--timing",   action="store_true", help="Print timing per step")
+    parser.add_argument("--seed",     type=int,   help="Set the random latent seed")
+    parser.add_argument("--guidance", type=float, default=7.5, help="Prompt strength")
+    args = parser.parse_args()
 
-  # benchmark settings
-  NUM_BENCH = 100
-  bench_times, bench_peak_vrams, bench_ips = [], [], []
+    # load prompts from CSV in the same directory
+    csv_path = Path(__file__).parent / "image_generation_prompts.csv"
+    prompts = []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            prompts.append(row.get("Prompt", default_prompt))
 
-  # load prompts from CSV in the same directory
-  csv_path = Path(__file__).parent / "image_generation_prompts.csv"
-  prompts = []
-  with open(csv_path, newline="", encoding="utf-8") as f:
-      reader = csv.DictReader(f)
-      for row in reader:
-          prompts.append(row["Prompt"] or default_prompt)
+    # prepare model
+    model = StableDiffusion()
+    with WallTimeEvent(BenchEvent.LOAD_WEIGHTS):
+        sd = torch_load(fetch(
+            "https://huggingface.co/CompVis/stable-diffusion-v-1-4-original/"
+            "resolve/main/sd-v1-4.ckpt",
+            "sd-v1-4.ckpt"
+        ))["state_dict"]
+        load_state_dict(model, sd, strict=False)
+        if args.fp16:
+            for k, v in get_state_dict(model).items():
+                if k.startswith("model"):
+                    v.replace(v.cast(dtypes.float16).realize())
 
-  model = StableDiffusion()
+    # timesteps setup
+    timesteps = list(range(1, 1000, 1000 // args.steps))
+    alphas = model.alphas_cumprod[Tensor(timesteps)]
+    alphas_prev = Tensor([1.0]).cat(alphas[:-1])
 
-  # load in weights
-  with WallTimeEvent(BenchEvent.LOAD_WEIGHTS):
-    sd = torch_load(fetch(
-      'https://huggingface.co/CompVis/stable-diffusion-v-1-4-original/resolve/main/sd-v1-4.ckpt',
-      'sd-v1-4.ckpt'
-    ))['state_dict']
-    load_state_dict(model, sd, strict=False)
+    @TinyJit
+    def run(model, *x):
+        return model(*x).realize()
 
-    if args.fp16:
-      for k, v in get_state_dict(model).items():
-        if k.startswith("model"):
-          v.replace(v.cast(dtypes.float16).realize())
+    # storage for stats
+    first_time = first_peak = first_ips = None
+    subsequent_times, subsequent_peaks, subsequent_ips = [], [], []
 
-  # prepare CLIP contexts
-  tokenizer = Tokenizer.ClipTokenizer()
-  prompt = Tensor([tokenizer.encode(args.prompt)])
-  context = model.cond_stage_model.transformer.text_model(prompt).realize()
-  print("got CLIP context", context.shape)
+    tokenizer = Tokenizer.ClipTokenizer()
 
-  prompt = Tensor([tokenizer.encode("")])
-  unconditional_context = model.cond_stage_model.transformer.text_model(prompt).realize()
-  print("got unconditional CLIP context", unconditional_context.shape)
+    for idx, prompt_text in enumerate(prompts, start=1):
+        print(f"\n=== Prompt {idx}/{len(prompts)}: {prompt_text}")
 
-  timesteps = list(range(1, 1000, 1000 // args.steps))
-  print(f"running for {timesteps} timesteps")
-  alphas = model.alphas_cumprod[Tensor(timesteps)]
-  alphas_prev = Tensor([1.0]).cat(alphas[:-1])
+        # encode contexts
+        ids = tokenizer.encode(prompt_text)
+        context = model.cond_stage_model.transformer.text_model(Tensor([ids])).realize()
+        uncond = model.cond_stage_model.transformer.text_model(Tensor([[ ]])).realize()  # empty prompt
 
-  @TinyJit
-  def run(model, *x): return model(*x).realize()
-
-  for idx_prompt, prompt_text in enumerate(prompts, 1):
-        print(f"\n=== Prompt {idx_prompt}/{len(prompts)}: {prompt_text}")
-
-        # encode and build contexts
-        prompt_ids = tokenizer.encode(prompt_text)
-        prompt_tensor = Tensor([prompt_ids])
-        context = model.cond_stage_model.transformer.text_model(prompt_tensor).realize()
-
-        uncond_ids = tokenizer.encode("")
-        uncond_tensor = Tensor([uncond_ids])
-        unconditional_context = (
-            model.cond_stage_model.transformer.text_model(uncond_tensor)
-        ).realize()
-
-        # seed and latent
         if args.seed is not None:
-            Tensor.manual_seed(args.seed + idx_prompt)
+            Tensor.manual_seed(args.seed + idx)
         latent = Tensor.randn(1, 4, 64, 64)
 
-        # diffusion loop
+        # run diffusion
         peak_vram = 0
-        start_time = time.perf_counter()
-        for step_idx, timestep in (t := tqdm(
-            list(enumerate(timesteps))[::-1],
-            desc=f"Run Prompt {idx_prompt}"
-        )):
+        start = time.perf_counter()
+        for step_idx, tval in (t := tqdm(list(enumerate(timesteps))[::-1], desc=f"Run {idx}")):
             GlobalCounters.reset()
-            t.set_description(f"{step_idx:3d} {timestep:3d}")
+            t.set_description(f"{step_idx:3d} {tval:3d}")
             with WallTimeEvent(BenchEvent.STEP):
                 latent = run(
-                    model, unconditional_context, context, latent,
-                    Tensor([timestep]), alphas[Tensor([step_idx])],
-                    alphas_prev[Tensor([step_idx])],
+                    model, uncond, context, latent,
+                    Tensor([tval]), alphas[Tensor([step_idx])], alphas_prev[Tensor([step_idx])],
                     Tensor([args.guidance])
                 )
             peak_vram = max(peak_vram, GlobalCounters.mem_used)
-        elapsed = time.perf_counter() - start_time
+        elapsed = time.perf_counter() - start
         ips = len(timesteps) / elapsed
 
-        # decode and save
-        img_array = model.decode(latent).numpy()
-        im = Image.fromarray(img_array)
-        # build safe filename
-        safe = "".join(
-            c if c.isalnum() or c in (" ", "_") else "_"
-            for c in prompt_text
-        )[:50].strip().replace(" ", "_")
-        # determine out path
-        if args.out:
-            out_path = Path(args.out)
-            if out_path.is_dir():
-                out_file = out_path / f"{safe}.png"
-            else:
-                out_file = out_path
+        # capture stats
+        if idx == 1:
+            first_time, first_peak, first_ips = elapsed, peak_vram, ips
         else:
-            out_file = Path(tempfile.gettempdir()) / f"{safe}.png"
-        im.save(out_file)
+            subsequent_times.append(elapsed)
+            subsequent_peaks.append(peak_vram)
+            subsequent_ips.append(ips)
+
+        # decode and save
+        arr = model.decode(latent).numpy()
+        img = Image.fromarray(arr)
+        safe = "".join(c if c.isalnum() else "_" for c in prompt_text)[:50]
+        out_dir = Path(args.out) if args.out and Path(args.out).is_dir() else Path(tempfile.gettempdir())
+        out_file = out_dir / f"{safe}.png"
+        img.save(out_file)
         if not args.noshow:
-            im.show()
+            img.show()
 
-        # print stats
-        print(f"Prompt {idx_prompt} done: {elapsed:.2f}s, "
-              f"peak VRAM {peak_vram/1e9:.2f} GB, {ips:.2f} iters/s")
+        print(f"Run {idx}: {elapsed:.2f}s, peak VRAM {peak_vram/1e9:.2f} GB, {ips:.2f} iters/s")
 
-  # summary
-  print("\nBenchmark summary over", NUM_BENCH, "runs")
-  print(f"Avg time      : {statistics.mean(bench_times):.2f}s")
-  print(f"Min time      : {min(bench_times):.2f}s, Max time {max(bench_times):.2f}s")
-  print(f"Avg peak VRAM : {statistics.mean(bench_peak_vrams):.2f} GB")
-  print(f"Min VRAM      : {min(bench_peak_vrams):.2f} GB, Max VRAM {max(bench_peak_vrams):.2f} GB")
-  print(f"Avg iters/sec : {statistics.mean(bench_ips):.2f}")
-  print(f"Min iters/sec : {min(bench_ips):.2f}, Max iters/sec {max(bench_ips):.2f}")
+    # summary
+    print("\nBenchmark Summary:")
+    print(f"First run: {first_time:.2f}s, {first_peak/1e9:.2f} GB, {first_ips:.2f} iters/s")
+    if subsequent_times:
+        avg_t = statistics.mean(subsequent_times)
+        avg_p = statistics.mean(subsequent_peaks)/1e9
+        avg_i = statistics.mean(subsequent_ips)
+        print(f"Subsequent runs (avg over {len(subsequent_times)}):")
+        print(f"  Time: {avg_t:.2f}s (min {min(subsequent_times):.2f}, max {max(subsequent_times):.2f})")
+        print(f"  VRAM: {avg_p:.2f} GB (min {min(subsequent_peaks)/1e9:.2f}, max {max(subsequent_peaks)/1e9:.2f})")
+        print(f"  Iters/sec: {avg_i:.2f} (min {min(subsequent_ips):.2f}, max {max(subsequent_ips):.2f})")
+
