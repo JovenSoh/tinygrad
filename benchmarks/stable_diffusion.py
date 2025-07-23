@@ -264,8 +264,7 @@ if __name__ == "__main__":
         # encode contexts
         ids = tokenizer.encode(prompt_text)
         context = model.cond_stage_model.transformer.text_model(Tensor([ids])).realize()
-        uncond_ids = tokenizer.encode(" ") 
-        uncond = model.cond_stage_model.transformer.text_model(Tensor([[uncond_ids]])).realize()  # empty prompt
+        uncond = model.cond_stage_model.transformer.text_model(Tensor([[ ]])).realize()  # empty prompt
 
         if args.seed is not None:
             Tensor.manual_seed(args.seed + idx)
