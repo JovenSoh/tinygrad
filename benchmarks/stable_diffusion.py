@@ -8,6 +8,7 @@ from typing import Dict, Any
 import time
 import statistics
 import csv
+import json
 
 from PIL import Image
 import numpy as np
@@ -322,3 +323,38 @@ if __name__ == "__main__":
         print(f"  VRAM: {avg_p:.2f} GB (min {min(subsequent_peaks)/1e9:.2f}, max {max(subsequent_peaks)/1e9:.2f})")
         print(f"  Iters/sec: {avg_i:.2f} (min {min(subsequent_ips):.2f}, max {max(subsequent_ips):.2f})")
 
+    # Build dictionary for JSON output
+    benchmark_result = {
+        "first_run": {
+            "time_seconds": round(first_time, 2),
+            "peak_vram_gb": round(first_peak / 1e9, 2),
+            "iterations_per_second": round(first_ips, 2)
+        }
+    }
+
+    if subsequent_times:
+        benchmark_result["subsequent_runs"] = {
+            "average": {
+                "time_seconds": round(avg_t, 2),
+                "peak_vram_gb": round(avg_p, 2),
+                "iterations_per_second": round(avg_i, 2),
+            },
+            "min": {
+                "time_seconds": round(min(subsequent_times), 2),
+                "peak_vram_gb": round(min(subsequent_peaks) / 1e9, 2),
+                "iterations_per_second": round(min(subsequent_ips), 2),
+            },
+            "max": {
+                "time_seconds": round(max(subsequent_times), 2),
+                "peak_vram_gb": round(max(subsequent_peaks) / 1e9, 2),
+                "iterations_per_second": round(max(subsequent_ips), 2),
+            },
+            "num_runs": len(subsequent_times)
+        }
+
+    # Save to JSON file
+    output_json_path = Path(__file__).parent / "benchmark_summary.json"
+    with open(output_json_path, "w", encoding="utf-8") as f:
+        json.dump(benchmark_result, f, indent=2)
+
+    print(f"\nBenchmark results saved to: {output_json_path}")
