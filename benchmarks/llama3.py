@@ -312,6 +312,7 @@ if __name__ == "__main__":
     generated = ""
   
     start_time = GlobalCounters.time_sum_s
+    peak_vram = 0
     #generate 500 tokens
     for _ in range(500):
       GlobalCounters.reset()
