@@ -100,15 +100,9 @@ The current recommended way to install tinygrad is from source.
 ### From source
 
 ```sh
-git clone https://github.com/tinygrad/tinygrad.git
+git clone https://github.com/JovenSoh/tinygrad.git
 cd tinygrad
-python3 -m pip install -e .
-```
-
-### Direct (master)
-
-```sh
-python3 -m pip install git+https://github.com/tinygrad/tinygrad.git
+python3 -m pip install -r requirements.txt
 ```
 
 ## Documentation
