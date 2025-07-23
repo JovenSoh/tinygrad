@@ -302,7 +302,7 @@ if __name__ == "__main__":
 
   times = []
   peaks = []
-  ips = []
+  tps = []
   
   for idx, paragraph in enumerate(paragraphs, start=1):
     # build initial token sequence: <BOS> user: paragraph <EOT>
@@ -313,8 +313,8 @@ if __name__ == "__main__":
   
     start_time = GlobalCounters.time_sum_s
     peak_vram = 0
-    #generate 500 tokens
-    for _ in range(500):
+    #generate 200 tokens
+    for _ in range(200):
       GlobalCounters.reset()
       st = GlobalCounters.time_sum_s
       with Profiling(enabled=args.profile):
@@ -330,9 +330,9 @@ if __name__ == "__main__":
       generated += tokenizer.decode([tok])
       peak_vram = max(peak_vram, GlobalCounters.mem_used)
     elapsed = GlobalCounters.time_sum_s - start_time
-    times += elapsed
-    peaks += peak_vram
-    tps += 500 / (GlobalCounters.time_sum_s - start_time)
+    times.append(elapsed)
+    peaks.append(peak_vram)
+    tps.append(500 / (GlobalCounters.time_sum_s - start_time)) 
     print(f"Paragraph {idx}: {elapsed:.2f}s, {500 / (GlobalCounters.time_sum_s - start_time) :.2f} tok/s, peak VRAM {peak_vram/1e9:.2f} GB")
     print(generated)
 
