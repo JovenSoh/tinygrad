@@ -291,10 +291,6 @@ if __name__ == "__main__":
   model = build_transformer(args.model, model_size=args.size, quantize=args.quantize, device=device)
   param_bytes = sum(x.uop.size * x.dtype.itemsize for x in get_parameters(model))
 
-  toks = [tokenizer.bos_id] + encode_message("user", "Hello.") + encode_role("assistant")
-
-  start_pos = prefill(model, toks[:-1])
-  last_tok = toks[-1]
   generated = ""
   # load paragraphs
   para_path = Path(__file__).parent / "llama_paragraphs"
@@ -307,7 +303,7 @@ if __name__ == "__main__":
   
   for idx, paragraph in enumerate(paragraphs, start=1):
     # build initial token sequence: <BOS> user: paragraph <EOT>
-    toks = [tokenizer.bos_id] + encode_message("user", paragraph) + encode_role("assistant")
+    toks = [tokenizer.bos_id] + encode_message("user", "Summarise this: " + paragraph) + encode_role("assistant")
     start_pos = prefill(model, toks[:-1])
     last_tok  = toks[-1]
     generated = ""
@@ -333,21 +329,21 @@ if __name__ == "__main__":
     elapsed = time.perf_counter() - start_time
     times.append(elapsed)
     peaks.append(peak_vram)
-    tps.append(500 / (time.perf_counter() - start_time)) 
-    print(f"Paragraph {idx}: {elapsed:.2f}s, {500 / (GlobalCounters.time_sum_s - start_time) :.2f} tok/s, peak VRAM {peak_vram/1e9:.2f} GB")
+    tps.append(500 / elapsed) 
+    print(f"Paragraph {idx}: {elapsed:.2f}s, {500 / elapsed :.2f} tok/s, peak VRAM {peak_vram/1e9:.2f} GB")
     print(generated)
 
   # first run stats
   first_run = {
       "time_seconds": round(times[0], 2),
       "peak_vram_gb": round(peaks[0] / 1e9, 2),
-      "iterations_per_second": round(ips[0], 2)
+      "iterations_per_second": round(tps[0], 2)
   }
 
   # subsequent runs
   sub_times = times[1:]
   sub_peaks = peaks[1:]
-  sub_ips   = ips[1:]
+  sub_ips   = tps[1:]
 
   subsequent_runs = {
       "average": {
