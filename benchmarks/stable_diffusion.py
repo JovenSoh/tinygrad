@@ -220,7 +220,7 @@ if __name__ == "__main__":
   args = parser.parse_args()
 
   # benchmark settings
-  NUM_BENCH = 100
+  NUM_BENCH = 10
   bench_times, bench_peak_vrams, bench_ips = [], [], []
 
   model = StableDiffusion()
