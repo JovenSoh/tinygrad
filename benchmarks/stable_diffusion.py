@@ -7,6 +7,7 @@ from collections import namedtuple
 from typing import Dict, Any
 import time
 import statistics
+import csv
 
 from PIL import Image
 import numpy as np
@@ -220,8 +221,16 @@ if __name__ == "__main__":
   args = parser.parse_args()
 
   # benchmark settings
-  NUM_BENCH = 10
+  NUM_BENCH = 100
   bench_times, bench_peak_vrams, bench_ips = [], [], []
+
+  # load prompts from CSV in the same directory
+  csv_path = Path(__file__).parent / "image_generation_prompts.csv"
+  prompts = []
+  with open(csv_path, newline="", encoding="utf-8") as f:
+      reader = csv.DictReader(f)
+      for row in reader:
+          prompts.append(row["Prompt"] or default_prompt)
 
   model = StableDiffusion()
 
@@ -256,37 +265,69 @@ if __name__ == "__main__":
   @TinyJit
   def run(model, *x): return model(*x).realize()
 
-  for i in range(NUM_BENCH):
-    if args.seed is not None:
-      Tensor.manual_seed(args.seed + i)
-    latent = Tensor.randn(1, 4, 64, 64)
+  for idx_prompt, prompt_text in enumerate(prompts, 1):
+        print(f"\n=== Prompt {idx_prompt}/{len(prompts)}: {prompt_text}")
 
-    step_peak = 0
-    start = time.perf_counter()
-    with Context(BEAM=getenv("LATEBEAM")):
-      for idx, timestep in (t := tqdm(list(enumerate(timesteps))[::-1],
-                                      desc=f"Run {i+1}/{NUM_BENCH}")):
-        GlobalCounters.reset()
-        t.set_description(f"{idx:3d} {timestep:3d}")
-        with WallTimeEvent(BenchEvent.STEP):
-          tid = Tensor([idx])
-          latent = run(model, unconditional_context, context, latent,
-                       Tensor([timestep]), alphas[tid], alphas_prev[tid], Tensor([args.guidance]))
-        step_peak = max(step_peak, GlobalCounters.mem_used)
+        # encode and build contexts
+        prompt_ids = tokenizer.encode(prompt_text)
+        prompt_tensor = Tensor([prompt_ids])
+        context = model.cond_stage_model.transformer.text_model(prompt_tensor).realize()
 
-    elapsed = time.perf_counter() - start
-    ips = len(timesteps) / elapsed
-    bench_times.append(elapsed)
-    bench_peak_vrams.append(step_peak / 1e9)
-    bench_ips.append(ips)
+        uncond_ids = tokenizer.encode("")
+        uncond_tensor = Tensor([uncond_ids])
+        unconditional_context = (
+            model.cond_stage_model.transformer.text_model(uncond_tensor)
+        ).realize()
 
-    x = model.decode(latent)
-    im = Image.fromarray(x.numpy())
-    im.save(args.out)
-    if not args.noshow:
-      im.show()
+        # seed and latent
+        if args.seed is not None:
+            Tensor.manual_seed(args.seed + idx_prompt)
+        latent = Tensor.randn(1, 4, 64, 64)
 
-    print(f"Run {i+1}: {elapsed:.2f}s, peak VRAM {step_peak/1e9:.2f} GB, {ips:.2f} iters/s")
+        # diffusion loop
+        peak_vram = 0
+        start_time = time.perf_counter()
+        for step_idx, timestep in (t := tqdm(
+            list(enumerate(timesteps))[::-1],
+            desc=f"Run Prompt {idx_prompt}"
+        )):
+            GlobalCounters.reset()
+            t.set_description(f"{step_idx:3d} {timestep:3d}")
+            with WallTimeEvent(BenchEvent.STEP):
+                latent = run(
+                    model, unconditional_context, context, latent,
+                    Tensor([timestep]), alphas[Tensor([step_idx])],
+                    alphas_prev[Tensor([step_idx])],
+                    Tensor([args.guidance])
+                )
+            peak_vram = max(peak_vram, GlobalCounters.mem_used)
+        elapsed = time.perf_counter() - start_time
+        ips = len(timesteps) / elapsed
+
+        # decode and save
+        img_array = model.decode(latent).numpy()
+        im = Image.fromarray(img_array)
+        # build safe filename
+        safe = "".join(
+            c if c.isalnum() or c in (" ", "_") else "_"
+            for c in prompt_text
+        )[:50].strip().replace(" ", "_")
+        # determine out path
+        if args.out:
+            out_path = Path(args.out)
+            if out_path.is_dir():
+                out_file = out_path / f"{safe}.png"
+            else:
+                out_file = out_path
+        else:
+            out_file = Path(tempfile.gettempdir()) / f"{safe}.png"
+        im.save(out_file)
+        if not args.noshow:
+            im.show()
+
+        # print stats
+        print(f"Prompt {idx_prompt} done: {elapsed:.2f}s, "
+              f"peak VRAM {peak_vram/1e9:.2f} GB, {ips:.2f} iters/s")
 
   # summary
   print("\nBenchmark summary over", NUM_BENCH, "runs")
