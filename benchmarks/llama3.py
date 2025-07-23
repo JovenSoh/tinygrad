@@ -8,6 +8,7 @@ from tinygrad.nn.state import safe_load, torch_load, load_state_dict, get_parame
 from tinygrad import Tensor, dtypes, nn, Context, Device, GlobalCounters
 from tinygrad.helpers import Profiling, Timing, DEBUG, colored, fetch, tqdm
 from extra.bench_log import BenchEvent, WallTimeEvent
+import time
 
 class Tokenizer:
   pat_str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
@@ -311,7 +312,7 @@ if __name__ == "__main__":
     last_tok  = toks[-1]
     generated = ""
   
-    start_time = GlobalCounters.time_sum_s
+    start_time = time.perf_counter()
     peak_vram = 0
     #generate 200 tokens
     for _ in range(200):
@@ -329,10 +330,10 @@ if __name__ == "__main__":
       last_tok = tok
       generated += tokenizer.decode([tok])
       peak_vram = max(peak_vram, GlobalCounters.mem_used)
-    elapsed = GlobalCounters.time_sum_s - start_time
+    elapsed = time.perf_counter() - start_time
     times.append(elapsed)
     peaks.append(peak_vram)
-    tps.append(500 / (GlobalCounters.time_sum_s - start_time)) 
+    tps.append(500 / (time.perf_counter() - start_time)) 
     print(f"Paragraph {idx}: {elapsed:.2f}s, {500 / (GlobalCounters.time_sum_s - start_time) :.2f} tok/s, peak VRAM {peak_vram/1e9:.2f} GB")
     print(generated)
 
