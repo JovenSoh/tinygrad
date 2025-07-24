@@ -353,7 +353,7 @@ if __name__ == "__main__":
         }
 
     # Save to JSON file
-    output_json_path = Path(__file__).parent / "benchmark_summary.json"
+    output_json_path = Path(__file__).parent / "sdv_stats.json"
     with open(output_json_path, "w", encoding="utf-8") as f:
         json.dump(benchmark_result, f, indent=2)
 

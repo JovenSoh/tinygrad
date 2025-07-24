@@ -330,7 +330,7 @@ if __name__ == "__main__":
     elapsed = time.perf_counter() - start_time
     times.append(elapsed)
     peaks.append(peak_vram)
-    tps.append(500 / elapsed) 
+    tps.append(output_tokens / elapsed) 
     print(f"Paragraph {idx}: {elapsed:.2f}s, {output_tokens / elapsed :.2f} tok/s, peak VRAM {peak_vram/1e9:.2f} GB")
     print(generated)
 
