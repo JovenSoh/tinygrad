@@ -344,23 +344,23 @@ if __name__ == "__main__":
   # subsequent runs
   sub_times = times[1:]
   sub_peaks = peaks[1:]
-  sub_ips   = tps[1:]
+  sub_tps   = tps[1:]
 
   subsequent_runs = {
       "average": {
           "time_seconds": round(sum(sub_times)/len(sub_times), 2),
           "peak_vram_gb": round(sum(sub_peaks)/len(sub_peaks)/1e9, 2),
-          "iterations_per_second": round(sum(sub_ips)/len(sub_ips), 2)
+          "iterations_per_second": round(sum(sub_tps)/len(sub_tps), 2)
       },
       "min": {
           "time_seconds": round(min(sub_times), 2),
           "peak_vram_gb": round(min(sub_peaks)/1e9, 2),
-          "iterations_per_second": round(min(sub_ips), 2)
+          "iterations_per_second": round(min(sub_tps), 2)
       },
       "max": {
           "time_seconds": round(max(sub_times), 2),
           "peak_vram_gb": round(max(sub_peaks)/1e9, 2),
-          "iterations_per_second": round(max(sub_ips), 2)
+          "iterations_per_second": round(max(sub_tps), 2)
       },
       "num_runs": len(sub_times)
   }
