@@ -296,6 +296,7 @@ if __name__ == "__main__":
   para_path = Path(__file__).parent / "llama_paragraphs"
   text = para_path.read_text(encoding="utf-8")
   paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+  output_tokens=200
 
   times = []
   peaks = []
@@ -311,7 +312,7 @@ if __name__ == "__main__":
     start_time = time.perf_counter()
     peak_vram = 0
     #generate 200 tokens
-    for _ in range(200):
+    for _ in range(output_tokens):
       GlobalCounters.reset()
       st = GlobalCounters.time_sum_s
       with Profiling(enabled=args.profile):
@@ -330,7 +331,7 @@ if __name__ == "__main__":
     times.append(elapsed)
     peaks.append(peak_vram)
     tps.append(500 / elapsed) 
-    print(f"Paragraph {idx}: {elapsed:.2f}s, {500 / elapsed :.2f} tok/s, peak VRAM {peak_vram/1e9:.2f} GB")
+    print(f"Paragraph {idx}: {elapsed:.2f}s, {output_tokens / elapsed :.2f} tok/s, peak VRAM {peak_vram/1e9:.2f} GB")
     print(generated)
 
   # first run stats
